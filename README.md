@@ -3,7 +3,7 @@
 
 ## Description
 
-Parking Space is a Dapp where users are able to rent or sell owned parkings lot based off the ownership of NFTs. I was inspired to create this project
+Parking Space is a Dapp where users are able to rent or sell owned parkings lot based off the ownership of NFTs. I was inspired to create this project by the issues of finding a parking spot in cities or malls of my country.
 
 ### Functionalities
 1. Users can mint an NFT that represents a parking lot, A mint fee is required to be paid

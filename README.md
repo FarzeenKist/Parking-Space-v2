@@ -14,4 +14,4 @@ Parking Space is a Dapp where users are able to rent or sell owned parkings lot 
 6. Users can buy a parking lot that is on sale
 
 
-#### Still a work in progress
+#### This is still a work in progress

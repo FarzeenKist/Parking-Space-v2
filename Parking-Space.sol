@@ -6,38 +6,48 @@ import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
+contract ParkingSpace is ERC721, ERC721URIStorage, Ownable, ReentrancyGuard {
     using Counters for Counters.Counter;
 
     Counters.Counter private totalParkings;
     Counters.Counter private blacklistCount;
 
-    // additional time given to renters to close their account with a rented lot
+    /// @dev additional time given to renters to close their account with a rented lot
     uint256 additionalTime;
+
+    uint minPrice;
 
     address payable contractOwner;
 
-    // keeps track of the addresses that has been blacklisted
+    /// @dev keeps track of the addresses that has been blacklisted
     mapping(address => bool) public blacklisted;
 
-    uint256 fee; //mintFee
+    uint256 mintFee;
+
+    /// @dev the maximum allowed lots to rent at a time
     uint256 maxLotPerWallet;
 
-    // this keeps tracks parking lots each wallet is renting
+    /// @dev this keeps tracks parking lots each wallet is renting
     mapping(address => uint256) public parkingLotsPerWallet;
 
     mapping(uint256 => Lot) private parkingLots;
-    mapping(uint256 => uint256) public lotPrice;
+
+    mapping(uint256 => uint256) private lotPrice;
 
     enum Listing {
         Sale,
         Rent,
-        Rented,
-        Unavailable
+        Unavailable,
+        Rented
     }
 
-    // integrate image, name, description to ipfs
+    /// @param status represents one of the four states in Listing
+    /// @param returnDay is the timestamp for day of return
+    /// @param rentTime is the number of days of rent
+    /// @param deposit is the percentage deposit to rent lot
+    /// @param price is the fee to rent per day
     struct Lot {
         address payable lender;
         address payable renter;
@@ -55,13 +65,14 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
         additionalTime = 5 hours;
         contractOwner = payable(msg.sender);
         maxLotPerWallet = 10;
-        fee = 1 ether;
+        mintFee = 1 ether;
+        minPrice = 1 ether;
     }
 
     // checks if desired lot is available
     modifier isAvailable(uint256 tokenId) {
         require(
-            parkingLots[tokenId].status == Listing.Rent,
+            parkingLots[tokenId].status != Listing.Rented,
             "Parking lot is current unavailable!"
         );
         _;
@@ -88,13 +99,18 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
     }
 
     // creates a parking lot
-    function createLot(string memory uri) public payable lotLimit {
+    /// @notice Lot.renter is initialized in the same way as the lender
+    function createLot(string memory uri)
+        external
+        payable
+        lotLimit
+        nonReentrant
+    {
         require(bytes(uri).length > 15, "Uri has to be valid");
-        require(msg.value == fee, "You need to pay the mint fee");
+        require(msg.value == mintFee, "You need to pay the mint fee");
 
         uint256 tokenId = totalParkings.current();
         totalParkings.increment();
-        //@notice Lot.renter is initialized in the same way as the lender
         parkingLots[tokenId] = Lot(
             payable(msg.sender),
             payable(msg.sender),
@@ -114,45 +130,60 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
         _setTokenURI(tokenId, uri);
     }
 
-    function toggleStatusHelper(uint256 option, uint256 tokenId) private {
-        if (ownerOf(tokenId) == address(this) && (option == 1 || option == 2)) {
+    function setUnavailable(uint256 tokenId) public isAvailable(tokenId) {
+        parkingLots[tokenId].status = Listing.Unavailable;
+        parkingLots[tokenId].deposit = 0;
+        parkingLots[tokenId].price = 0;
+        lotPrice[tokenId] = 0;
+        if (ownerOf(tokenId) == address(this)) {
             _transfer(address(this), msg.sender, tokenId);
-            require(
-                ownerOf(tokenId) == msg.sender,
-                "Safe transfer of NFT failed"
-            );
-        } else if (ownerOf(tokenId) == msg.sender && option == 0) {
-            _transfer(msg.sender, address(this), tokenId);
-            require(
-                ownerOf(tokenId) == address(this),
-                "Safe transfer of NFT failed"
-            );
         }
     }
 
-    function toggleStatus(uint256 option, uint256 tokenId)
+    function setSale(uint256 tokenId, uint256 price)
         public
-        returns (uint256)
+        isAvailable(tokenId)
     {
         Lot storage currentLot = parkingLots[tokenId];
-        if (option == 0) {
-            currentLot.status = Listing.Sale;
-            toggleStatusHelper(option, tokenId);
+        require(price > 0, "Enter valid price");
+        require(
+            msg.sender == currentLot.lender,
+            "Only the owner can perform this action"
+        );
+        currentLot.status = Listing.Sale;
+        lotPrice[tokenId] = price;
+        currentLot.price = 0;
+        currentLot.deposit = 0;
+        if (ownerOf(tokenId) == msg.sender) {
+            _transfer(msg.sender, address(this), tokenId);
         }
-        if (option == 1) {
-            currentLot.status = Listing.Rent;
-            _approve(address(this), tokenId);
-            toggleStatusHelper(option, tokenId);
-        }
-        if (option == 2) {
-            currentLot.status = Listing.Unavailable;
-            toggleStatusHelper(option, tokenId);
-        }
-
-        return uint256(currentLot.status);
     }
 
-    function buyLot(uint256 tokenId) public payable {
+    function setRent(
+        uint256 tokenId,
+        uint256 price,
+        uint256 deposit
+    ) public isAvailable(tokenId) {
+        Lot storage currentLot = parkingLots[tokenId];
+        require(
+            price > 0 && deposit <= 100,
+            "Enter valid price and depsoit amount"
+        );
+        require(
+            msg.sender == currentLot.lender,
+            "Only the owner can perform this action"
+        );
+        currentLot.status = Listing.Rent;
+        if (ownerOf(tokenId) == address(this)) {
+            _transfer(address(this), msg.sender, tokenId);
+        }
+        _approve(address(this), tokenId);
+        lotPrice[tokenId] = 0;
+        currentLot.price = price;
+        currentLot.deposit = deposit;
+    }
+
+    function buyLot(uint256 tokenId) external payable nonReentrant {
         Lot storage currentLot = parkingLots[tokenId];
         require(
             msg.value == lotPrice[tokenId],
@@ -172,37 +203,10 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
         require(success, "Payment to buy lot failed");
     }
 
-    function setLotPrice(uint256 tokenId, uint256 price) public {
-        Lot storage currentLot = parkingLots[tokenId];
-        require(price > 0, "Enter valid price");
-        require(
-            msg.sender == currentLot.lender,
-            "Only the owner can perform this action"
-        );
-        lotPrice[tokenId] = price;
-    }
-
-    function setRent(
-        uint256 tokenId,
-        uint256 price,
-        uint256 deposit
-    ) public {
-        Lot storage currentLot = parkingLots[tokenId];
-        require(
-            price > 0 && deposit <= 100,
-            "Enter valid price and depsoit amount"
-        );
-        require(
-            msg.sender == currentLot.lender,
-            "Only the owner can perform this action"
-        );
-        currentLot.price = price;
-        currentLot.deposit = deposit;
-    }
-
-    // Rents a selected Lot to the caller
+    /// @dev Rents a selected Lot to the caller
+    /// @param _time is assumed to be in seconds, representing the number of days to rent
     function rentLot(uint256 tokenId, uint256 _time)
-        public
+        external
         payable
         isAvailable(tokenId)
         rentOver(tokenId)
@@ -216,15 +220,13 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
             msg.sender != currentLot.renter,
             "You are currently renting this apartment"
         );
-        // _time is in seconds so it is converted into days
-        uint256 rentingTime = _time / 3600 / 24;
+        require(_time >= 1 days, "Time needs to be at least one day");
         // deposit is calculated bv the percentage set by lender multiplied by the total fee
-        uint256 amount = (parkingLots[tokenId].deposit / 100) *
-            (parkingLots[tokenId].price * rentingTime);
+        uint256 amount = getRentPrice(tokenId, _time, 1);
         require(msg.value == amount, "You need to pay to rent lot");
         currentLot.renter = payable(msg.sender);
         currentLot.rentTime = _time;
-        currentLot.returnDay = block.timestamp + _time;
+        currentLot.returnDay = block.timestamp + 0; //for testing purposes
         currentLot.status = Listing.Rented;
         _transfer(currentLot.lender, msg.sender, tokenId);
         _approve(address(this), tokenId);
@@ -232,18 +234,21 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
         require(success, "Payment to rent lot failed");
     }
 
-    function endRentHelper(uint256 tokenId) internal {
+    /// @dev this is a helper function to reset values and transfer lot back to lender
+    function endRentHelper(uint256 tokenId) private {
         Lot storage currentLot = parkingLots[tokenId];
+        address renter = currentLot.renter;
         // Changes is made to the lot to make it available for renting again
         currentLot.returnDay = 0;
         currentLot.rentTime = 0;
         currentLot.renter = payable(currentLot.lender);
         currentLot.status = Listing.Rent;
+        _transfer(renter, currentLot.lender, tokenId);
     }
 
-    // this function is used by the renter to end the rent and pay the remaining fees(if any) to the lender
-    function clientEndRent(uint256 tokenId) public payable {
-        Lot storage currentLot = parkingLots[tokenId];
+    /// @dev this function is used by the renter to end the rent and pay the remaining fees(if any) to the lender
+    function clientEndRent(uint256 tokenId) external payable nonReentrant {
+        Lot memory currentLot = parkingLots[tokenId];
         require(
             currentLot.renter == msg.sender,
             "Only the renter can end the rent"
@@ -255,11 +260,7 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
 
         // if deposit is 100% then there is no need to pay the lender again
         if (currentLot.deposit < 100) {
-            uint256 rentingTime = (block.timestamp - currentLot.returnDay) /
-                3600 /
-                24;
-            uint256 amount = ((100 - parkingLots[tokenId].deposit) / 100) *
-                (parkingLots[tokenId].price * rentingTime);
+            uint256 amount = getRentPrice(tokenId, currentLot.rentTime, 3);
             require(
                 msg.value == amount,
                 "You need to pay the remaining fees to end rent"
@@ -271,7 +272,7 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
     }
 
     // this function is used by the lender in the situation that the renter hasn't return the lot after the deadline and additional time
-    function lenderEndRent(uint256 tokenId) public payable {
+    function lenderEndRent(uint256 tokenId) external payable {
         Lot storage currentLot = parkingLots[tokenId];
         require(
             currentLot.lender == msg.sender,
@@ -292,14 +293,26 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
         return parkingLots[tokenId];
     }
 
-    function getRentPrice(uint256 tokenId, uint256 _time)
-        public
-        view
-        returns (uint256)
-    {
-        uint256 amount = (parkingLots[tokenId].deposit / 100) *
-            (parkingLots[tokenId].price * (_time / 1 days));
+    function getRentPrice(
+        uint256 tokenId,
+        uint256 _time,
+        uint _status
+    ) public view returns (uint256) {
+        uint amount;
+        if (_status == uint(Listing.Rented)) {
+            amount =
+                ((100 - parkingLots[tokenId].deposit) / 100) *
+                (parkingLots[tokenId].price * (_time / 1 days));
+        } else if (_status == uint(Listing.Rent)) {
+            amount =
+                (parkingLots[tokenId].deposit / 100) *
+                (parkingLots[tokenId].price * (_time / 1 days));
+        }
         return amount;
+    }
+
+    function getLotPrice(uint tokenId) public view returns (uint) {
+        return lotPrice[tokenId];
     }
 
     function getParkingLotsLength() public view returns (uint256) {
@@ -314,8 +327,8 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
         return maxLotPerWallet;
     }
 
-    function getFees() public view returns (uint256) {
-        return fee;
+    function getMintFee() public view returns (uint256) {
+        return mintFee;
     }
 
     // The following functions are overrides required by Solidity.
@@ -331,7 +344,7 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
 
     /**
      * @dev See {IERC721-transferFrom}.
-     * Changes is made to approve to prevent the renter from stealing the token
+     * Changes is made to transferFrom to prevent the renter from stealing the token
      */
     function transferFrom(
         address from,
@@ -347,7 +360,7 @@ contract ParkingSpace is ERC721, ERC721URIStorage, Ownable {
 
     /**
      * @dev See {IERC721-safeTransferFrom}.
-     * Changes is made to approve to prevent the renter from stealing the token
+     * Changes is made to safeTransferFrom to prevent the renter from stealing the token
      */
     function safeTransferFrom(
         address from,
